@@ -1,5 +1,9 @@
 <?xml version="1.0"?>
 <launch>
+  <arg name="debug" default="false"/>
+  <arg if="$(arg debug)" name="launch-prefix" value="screen -d -m gdb -command=$(env HOME)/.ros/my_debug_log --ex run --args"/>
+  <arg unless="$(arg debug)" name="launch-prefix" value=""/>
+
   <arg name="use_local_control_computer" default="true"/>
   <arg name="fake_connection" default="false"/>
   <arg name="control_loop_hz" default="500"/>
@@ -44,7 +48,7 @@
      output="screen" args="load $(arg controllers_to_load)"/>
 
   <node machine="control-computer" name="kinova_gen3_hardware_interface_node" pkg="kinova_gen3_control" type="kinova_gen3_control_node" respawn="false"
-    output="screen">
+    output="screen" launch-prefix="$(arg launch-prefix)">
     <param name="fake_connection" value="$(arg fake_connection)"/>
     <param name="control_loop_hz" value="$(arg control_loop_hz)"/>
   </node>
