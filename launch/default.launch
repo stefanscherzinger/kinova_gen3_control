@@ -51,5 +51,6 @@
     output="screen" launch-prefix="$(arg launch-prefix)">
     <param name="fake_connection" value="$(arg fake_connection)"/>
     <param name="control_loop_hz" value="$(arg control_loop_hz)"/>
+    <rosparam file="$(find kinova_gen3_control)/config/kinova_gen3_hardware_interface.yaml"/>
   </node>
 </launch>

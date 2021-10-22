@@ -13,7 +13,9 @@ find_package(catkin REQUIRED
   joint_limits_interface 
   controller_manager
   angles
-  roscpp)
+  roscpp
+  control_toolbox
+  )
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)

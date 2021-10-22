@@ -1,5 +1,7 @@
 #include "kinova_gen3_control/kinova_gen3_hardware_interface.h"
 #include "angles/angles.h"
+#include "ros/node_handle.h"
+#include <array>
 
 void
 InitializeLowLevelControl(std::shared_ptr<KinovaNetworkConnection> network_connection)
@@ -98,8 +100,14 @@ KinovaGen3HardwareInterface::KinovaGen3HardwareInterface(
   {
     // note how a hardware_interface::JointHandle requires a hardware_interface::JointStateHandle in its constructor
     // in case you're wondering how this for loop relates to the for loop above
-    hardware_interface::JointHandle eff_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &cmd_[i]);
+    hardware_interface::JointHandle eff_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &eff_cmd_[i]);
     jnt_eff_interface_.registerHandle(eff_handle);
+
+    hardware_interface::JointHandle pos_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &pos_cmd_[i]);
+    jnt_pos_interface_.registerHandle(pos_handle);
+
+    hardware_interface::JointHandle cmd_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &cmd_[i]);
+    jnt_cmd_interface_.registerHandle(cmd_handle);
   }
 
 
@@ -107,12 +115,32 @@ KinovaGen3HardwareInterface::KinovaGen3HardwareInterface(
   for (int i = 0; i < NUMBER_OF_JOINTS; i++)
   {
     // Register handle in joint limits interface
-    joint_limits_interface::EffortJointSaturationHandle eff_limit_handle(jnt_eff_interface_.getHandle(joint_names_[i + array_index_offset]), // We read the state and read/write the command
+    joint_limits_interface::EffortJointSaturationHandle cmd_limit_handle(jnt_cmd_interface_.getHandle(joint_names_[i + array_index_offset]), // We read the state and read/write the command
                                          limits_[i + array_index_offset]);       // Limits struct, copy constructor copies this
-    jnt_eff_limit_interface_.registerHandle(eff_limit_handle);
+    jnt_cmd_limit_interface_.registerHandle(cmd_limit_handle);
+  }
+
+  // Setup pid controllers for the joint impedance rendering.
+  // Each joint exposes a dynamic reconfigure server for its PID parameters.
+  pid_controllers_.resize(NUMBER_OF_JOINTS);
+  ros::NodeHandle nh("~");
+  for (int i = 0; i < NUMBER_OF_JOINTS; i++)
+  {
+    const std::string config_ns = "joint_impedance/" + joint_names[i];
+    if (!pid_controllers_[i].init(ros::NodeHandle(nh, config_ns)))
+    {
+      // default gains without dynamic reconfigure options
+      pid_controllers_[i].initPid(1.0, 0, 0, 0, 0);
+      ROS_WARN("%s: Couldn't find PID gains, using default: p:%f i:%f d:%f",
+          joint_names[i].c_str(),
+          pid_controllers_[i].getGains().p_gain_,
+          pid_controllers_[i].getGains().i_gain_,
+          pid_controllers_[i].getGains().d_gain_);
+    }
   }
 
   registerInterface(&jnt_eff_interface_);
+  registerInterface(&jnt_pos_interface_);
   ROS_INFO("Hardware interfaces registered");
 }
 
@@ -125,15 +153,24 @@ void KinovaGen3HardwareInterface::write(const ros::Duration& period)
 {
   if (NUMBER_OF_JOINTS == 7)
   {
-    ROS_DEBUG_THROTTLE(1, "Commanded effort of %f, %f, %f, %f, %f, %f, %f", cmd_[0], cmd_[1], cmd_[2], cmd_[3], cmd_[4], cmd_[5], cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Effort command is %f, %f, %f, %f, %f, %f, %f", eff_cmd_[0], eff_cmd_[1], eff_cmd_[2], eff_cmd_[3], eff_cmd_[4], eff_cmd_[5], eff_cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Position command is %f, %f, %f, %f, %f, %f, %f", pos_cmd_[0], pos_cmd_[1], pos_cmd_[2], pos_cmd_[3], pos_cmd_[4], pos_cmd_[5], pos_cmd_[6]);
   }
   else
   {
-   ROS_DEBUG_THROTTLE(1, "Commanded effort of %f", cmd_[0]);
+   ROS_DEBUG_THROTTLE(1, "Effort command is %f", eff_cmd_[0]);
+   ROS_DEBUG_THROTTLE(1, "Position command is %f", pos_cmd_[0]);
+  }
+
+  std::array<double, NUMBER_OF_JOINTS> dynamics;
+  for (int i = 0; i < NUMBER_OF_JOINTS; i++)
+  {
+    // Feedback linearization + feedforward torque + pid position control
+    cmd_[i] = dynamics[i] + eff_cmd_[i] + pid_controllers_[i].computeCommand(pos_cmd_[i] - pos_[i], period);
   }
 
   Kinova::Api::BaseCyclic::Command  base_command;
-  jnt_eff_limit_interface_.enforceLimits(period);
+  jnt_cmd_limit_interface_.enforceLimits(period);
 
   if (NUMBER_OF_JOINTS == 7)
   {
@@ -149,7 +186,11 @@ void KinovaGen3HardwareInterface::write(const ros::Duration& period)
   // add position to each joint (even if only intentionally actuating fewer
   for (int i = 0; i < 7; i++)
   {
-    // Save the current actuator position, to avoid a following error
+    // Keep joint position commands in sync with the current motion.
+    // The Kinova actuator API requires this. If commanded and measured
+    // positions diverge too much, the robot goes into an error state.
+    // Always sending the current state lets the actuators appear backdrivable
+    // and the torque control interface behaves as expected.
     base_command.add_actuators()->set_position(base_feedback_.actuators(i).position());
   }
   int array_index_offset = FIRST_JOINT_INDEX - 1;
@@ -198,15 +239,18 @@ void KinovaGen3HardwareInterface::read()
     // Note that this oddity is also reflected on the Kinova Dashboard 
     // (a positive torque there also means the joint is trying to make the position more negative)
     eff_[i] = -base_feedback_.actuators(i + array_index_offset).torque(); // originally Newton * meters
-    cmd_[i] = eff_[i]; // so that weird stuff doesn't happen before controller loads
+
+    // Starting point for the impedance control law in each cycle.
+    pos_cmd_[i] = pos_[i]; // nominal position
+    eff_cmd_[i] = 0.0; // feedforward torque
   }
   
   if (NUMBER_OF_JOINTS == 7)
   {
-    ROS_DEBUG_THROTTLE(1, "Read an effort of %f, %f, %f, %f, %f, %f, %f", cmd_[0], cmd_[1], cmd_[2], cmd_[3], cmd_[4], cmd_[5], cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Read an effort of %f, %f, %f, %f, %f, %f, %f", eff_cmd_[0], eff_cmd_[1], eff_cmd_[2], eff_cmd_[3], eff_cmd_[4], eff_cmd_[5], eff_cmd_[6]);
   }
   else
   {
-    ROS_DEBUG_THROTTLE(1, "Read effort %03.4f, vel %03.4f, pos %03.4f", cmd_[0], vel_[0], pos_[0]);
+    ROS_DEBUG_THROTTLE(1, "Read effort %03.4f, vel %03.4f, pos %03.4f", eff_cmd_[0], vel_[0], pos_[0]);
   }
 }
