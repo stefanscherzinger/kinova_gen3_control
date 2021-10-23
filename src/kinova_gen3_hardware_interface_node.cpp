@@ -1,4 +1,5 @@
 #include <controller_manager/controller_manager.h>
+#include <memory>
 #include <ros/ros.h>
 #include <urdf/model.h>
 #include <joint_limits_interface/joint_limits_interface.h>
@@ -63,13 +64,22 @@ int main(int argc, char** argv)
     limits_list.push_back(limits);
   }
 
-  KinovaGen3HardwareInterface robot(
-      joint_names,
-      limits_list,
-      network_connection);
+  std::unique_ptr<KinovaGen3HardwareInterface> robot;
+  try
+  {
+    robot = std::make_unique<KinovaGen3HardwareInterface>(
+        joint_names,
+        limits_list,
+        network_connection);
+  }
+  catch (std::runtime_error& ex)
+  {
+    std::cout << ex.what() << std::endl;
+    return 0; // Clean exit in ROS
+  }
 
   ROS_INFO("Starting controller manager");
-  controller_manager::ControllerManager controller_manager(&robot, nh);
+  controller_manager::ControllerManager controller_manager(robot.get(), nh);
   ROS_INFO("Controller manager started");
 
   double control_loop_hz;
@@ -107,7 +117,7 @@ int main(int argc, char** argv)
   while (ros::ok())
   {
     start = stop;
-    robot.read();
+    robot->read();
     stop = ros::Time::now();
     read_time_secs = (stop-start).toSec();
 
@@ -126,7 +136,7 @@ int main(int argc, char** argv)
     update_time_secs = (stop-start).toSec();
 
     start = stop;
-    robot.write(controller_manager_loop_duration);
+    robot->write(controller_manager_loop_duration);
     stop = ros::Time::now();
     write_time_secs = (stop-start).toSec();
 
