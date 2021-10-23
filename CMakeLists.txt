@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(kinova_gen3_control)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD 14)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -15,8 +15,11 @@ find_package(catkin REQUIRED
   angles
   roscpp
   control_toolbox
+  kdl_parser
   )
 
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+ 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
@@ -135,6 +138,7 @@ catkin_package(
 include_directories(
  include
  ${catkin_INCLUDE_DIRS}
+ ${EIGEN_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -170,6 +174,7 @@ add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catk
 target_link_libraries(${PROJECT_NAME}_node
    ${KORTEX_DIR}lib/release/libKortexApiCpp.a
    ${catkin_LIBRARIES}
+   Eigen3::Eigen
 )
 
 #############

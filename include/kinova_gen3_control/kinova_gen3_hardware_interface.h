@@ -8,6 +8,8 @@
 #include <BaseCyclicClientRpc.h>
 #include <ActuatorConfigClientRpc.h>
 #include <control_toolbox/pid.h>
+#include <kdl/chainidsolver_recursive_newton_euler.hpp>
+#include <kdl/chain.hpp>
 
 #include <joint_limits_interface/joint_limits_interface.h>
 
@@ -49,5 +51,7 @@ class KinovaGen3HardwareInterface : public hardware_interface::RobotHW
     double vel_[NUMBER_OF_JOINTS];
     double eff_[NUMBER_OF_JOINTS];
     std::vector<control_toolbox::Pid> pid_controllers_;
+    std::unique_ptr<KDL::ChainIdSolver_RNE> dynamics_solver_;
+    KDL::Chain robot_chain_;
 };
 #endif // KINOVA_GEN3_HARDWARE_INTERFACE_H 

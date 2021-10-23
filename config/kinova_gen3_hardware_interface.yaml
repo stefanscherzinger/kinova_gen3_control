@@ -1,4 +1,6 @@
 # Joint impedance configuration
+robot_base_link: "base_link"
+robot_tip_link: "end_effector_link"
 joint_impedance:
     joint_1: {p: 10.0, i: 0.0, d: 1.0, i_clamp_min: -1.0, i_clamp_max: 1.0}
     joint_2: {p: 10.0, i: 0.0, d: 1.0, i_clamp_min: -1.0, i_clamp_max: 1.0}
