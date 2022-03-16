@@ -7,6 +7,9 @@
 #include <BaseClientRpc.h>
 #include <BaseCyclicClientRpc.h>
 #include <ActuatorConfigClientRpc.h>
+#include <control_toolbox/pid.h>
+#include <kdl/chainidsolver_recursive_newton_euler.hpp>
+#include <kdl/chain.hpp>
 
 #include <joint_limits_interface/joint_limits_interface.h>
 
@@ -36,12 +39,19 @@ class KinovaGen3HardwareInterface : public hardware_interface::RobotHW
     std::vector<joint_limits_interface::JointLimits> limits_;
     hardware_interface::JointStateInterface jnt_state_interface_;
     hardware_interface::EffortJointInterface jnt_eff_interface_;
-    joint_limits_interface::EffortJointSaturationInterface jnt_eff_limit_interface_;
+    hardware_interface::PositionJointInterface jnt_pos_interface_;
+    hardware_interface::EffortJointInterface jnt_cmd_interface_;
+    joint_limits_interface::EffortJointSaturationInterface jnt_cmd_limit_interface_;
     // no need to re-create this object every time it's used
     Kinova::Api::BaseCyclic::Feedback base_feedback_;
+    double eff_cmd_[NUMBER_OF_JOINTS];
+    double pos_cmd_[NUMBER_OF_JOINTS];
     double cmd_[NUMBER_OF_JOINTS];
     double pos_[NUMBER_OF_JOINTS];
     double vel_[NUMBER_OF_JOINTS];
     double eff_[NUMBER_OF_JOINTS];
+    std::vector<control_toolbox::Pid> pid_controllers_;
+    std::unique_ptr<KDL::ChainIdSolver_RNE> dynamics_solver_;
+    KDL::Chain robot_chain_;
 };
 #endif // KINOVA_GEN3_HARDWARE_INTERFACE_H 

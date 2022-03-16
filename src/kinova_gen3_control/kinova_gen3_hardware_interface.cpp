@@ -1,5 +1,14 @@
 #include "kinova_gen3_control/kinova_gen3_hardware_interface.h"
 #include "angles/angles.h"
+#include "ros/node_handle.h"
+#include <array>
+#include <memory>
+
+#include <kdl/jntarray.hpp>
+#include <kdl/tree.hpp>
+#include <kdl_parser/kdl_parser.hpp>
+#include <stdexcept>
+#include <urdf/model.h>
 
 void
 InitializeLowLevelControl(std::shared_ptr<KinovaNetworkConnection> network_connection)
@@ -98,8 +107,14 @@ KinovaGen3HardwareInterface::KinovaGen3HardwareInterface(
   {
     // note how a hardware_interface::JointHandle requires a hardware_interface::JointStateHandle in its constructor
     // in case you're wondering how this for loop relates to the for loop above
-    hardware_interface::JointHandle eff_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &cmd_[i]);
+    hardware_interface::JointHandle eff_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &eff_cmd_[i]);
     jnt_eff_interface_.registerHandle(eff_handle);
+
+    hardware_interface::JointHandle pos_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &pos_cmd_[i]);
+    jnt_pos_interface_.registerHandle(pos_handle);
+
+    hardware_interface::JointHandle cmd_handle(jnt_state_interface_.getHandle(joint_names_[i + array_index_offset]), &cmd_[i]);
+    jnt_cmd_interface_.registerHandle(cmd_handle);
   }
 
 
@@ -107,13 +122,92 @@ KinovaGen3HardwareInterface::KinovaGen3HardwareInterface(
   for (int i = 0; i < NUMBER_OF_JOINTS; i++)
   {
     // Register handle in joint limits interface
-    joint_limits_interface::EffortJointSaturationHandle eff_limit_handle(jnt_eff_interface_.getHandle(joint_names_[i + array_index_offset]), // We read the state and read/write the command
+    joint_limits_interface::EffortJointSaturationHandle cmd_limit_handle(jnt_cmd_interface_.getHandle(joint_names_[i + array_index_offset]), // We read the state and read/write the command
                                          limits_[i + array_index_offset]);       // Limits struct, copy constructor copies this
-    jnt_eff_limit_interface_.registerHandle(eff_limit_handle);
+    jnt_cmd_limit_interface_.registerHandle(cmd_limit_handle);
   }
 
   registerInterface(&jnt_eff_interface_);
+  registerInterface(&jnt_pos_interface_);
   ROS_INFO("Hardware interfaces registered");
+
+  // Setup pid controllers for the joint impedance rendering.
+  // Each joint exposes a dynamic reconfigure server for its PID parameters.
+  pid_controllers_.resize(NUMBER_OF_JOINTS);
+  ros::NodeHandle nh("~");
+  for (int i = 0; i < NUMBER_OF_JOINTS; i++)
+  {
+    const std::string config_ns = "joint_impedance/" + joint_names[i];
+    if (!pid_controllers_[i].init(ros::NodeHandle(nh, config_ns)))
+    {
+      // default gains without dynamic reconfigure options
+      pid_controllers_[i].initPid(1.0, 0, 0, 0, 0);
+      ROS_WARN("%s: Couldn't find PID gains, using default: p:%f i:%f d:%f",
+          joint_names[i].c_str(),
+          pid_controllers_[i].getGains().p_gain_,
+          pid_controllers_[i].getGains().i_gain_,
+          pid_controllers_[i].getGains().d_gain_);
+    }
+  }
+
+  // Parse robot configuration
+  std::string robot_description;
+  std::string robot_base_link;
+  std::string robot_tip_link;
+  urdf::Model robot_model;
+  KDL::Tree   robot_tree;
+  const std::string ns = nh.getNamespace();
+  bool initialized = true;
+
+  if (!ros::param::search("robot_description", robot_description))
+  {
+    ROS_ERROR_STREAM(ns << ": Searched enclosing namespaces for robot_description but nothing found");
+    initialized = false;
+  }
+  if (!nh.getParam(robot_description, robot_description))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to load robot_description from parameter server");
+    initialized = false;
+  }
+  if (!nh.getParam("robot_base_link", robot_base_link))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to load robot_base_link from parameter server");
+    initialized = false;
+  }
+  if (!nh.getParam("robot_tip_link", robot_tip_link))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to load robot_tip_link from parameter server");
+    initialized = false;
+  }
+
+  // Build a kinematic chain of the robot
+  if (!robot_model.initString(robot_description))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to parse urdf model from robot_description");
+    initialized = false;
+  }
+  if (!kdl_parser::treeFromUrdfModel(robot_model, robot_tree))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to parse KDL tree from urdf model");
+    initialized = false;
+  }
+  if (!robot_tree.getChain(robot_base_link, robot_tip_link, robot_chain_))
+  {
+    ROS_ERROR_STREAM(ns << ": Failed to parse robot chain from urdf model.");
+    initialized = false;
+  }
+
+  // Setup dynamics load compensation
+  auto gravity = KDL::Vector(0, 0, -9.82);  // in robot_base_link
+  dynamics_solver_ = std::make_unique<KDL::ChainIdSolver_RNE>(robot_chain_, gravity);
+
+  if (!initialized)
+  {
+    ROS_ERROR_STREAM(ns << ": Initialization failed.");
+    throw std::runtime_error("Taking down node");
+  }
+
+  ROS_INFO("\033[1;37mKinova-Gen3 hardware interface ready\033[0m");  // bold white
 }
 
 KinovaGen3HardwareInterface::~KinovaGen3HardwareInterface()
@@ -125,15 +219,38 @@ void KinovaGen3HardwareInterface::write(const ros::Duration& period)
 {
   if (NUMBER_OF_JOINTS == 7)
   {
-    ROS_DEBUG_THROTTLE(1, "Commanded effort of %f, %f, %f, %f, %f, %f, %f", cmd_[0], cmd_[1], cmd_[2], cmd_[3], cmd_[4], cmd_[5], cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Effort command is %f, %f, %f, %f, %f, %f, %f", eff_cmd_[0], eff_cmd_[1], eff_cmd_[2], eff_cmd_[3], eff_cmd_[4], eff_cmd_[5], eff_cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Position command is %f, %f, %f, %f, %f, %f, %f", pos_cmd_[0], pos_cmd_[1], pos_cmd_[2], pos_cmd_[3], pos_cmd_[4], pos_cmd_[5], pos_cmd_[6]);
   }
   else
   {
-   ROS_DEBUG_THROTTLE(1, "Commanded effort of %f", cmd_[0]);
+   ROS_DEBUG_THROTTLE(1, "Effort command is %f", eff_cmd_[0]);
+   ROS_DEBUG_THROTTLE(1, "Position command is %f", pos_cmd_[0]);
+  }
+
+  // Compute dynamic joint loads due to robot motion.
+  // This serves as a feedback linearization for the joint impedance control.
+  KDL::JntArray dynamic_loads(NUMBER_OF_JOINTS);
+  KDL::JntArray positions(NUMBER_OF_JOINTS);
+  KDL::JntArray velocities(NUMBER_OF_JOINTS);
+  KDL::JntArray accelerations(NUMBER_OF_JOINTS); // zero initialized
+  KDL::Wrenches external_forces(NUMBER_OF_JOINTS); // zero initialized
+  for (int i = 0; i < NUMBER_OF_JOINTS; i++)
+  {
+    positions(i) = pos_[i];
+    velocities(i) = vel_[i];
+  }
+
+  dynamics_solver_->CartToJnt(positions, velocities, accelerations, external_forces, dynamic_loads);
+
+  for (int i = 0; i < NUMBER_OF_JOINTS; i++)
+  {
+    // Feedforward dynamics linearization + torque control + pid position control.
+    cmd_[i] = dynamic_loads(i) + eff_cmd_[i] + pid_controllers_[i].computeCommand(pos_cmd_[i] - pos_[i], period);
   }
 
   Kinova::Api::BaseCyclic::Command  base_command;
-  jnt_eff_limit_interface_.enforceLimits(period);
+  jnt_cmd_limit_interface_.enforceLimits(period);
 
   if (NUMBER_OF_JOINTS == 7)
   {
@@ -149,7 +266,11 @@ void KinovaGen3HardwareInterface::write(const ros::Duration& period)
   // add position to each joint (even if only intentionally actuating fewer
   for (int i = 0; i < 7; i++)
   {
-    // Save the current actuator position, to avoid a following error
+    // Keep joint position commands in sync with the current motion.
+    // The Kinova actuator API requires this. If commanded and measured
+    // positions diverge too much, the robot goes into an error state.
+    // Always sending the current state lets the actuators appear backdrivable
+    // and the torque control interface behaves as expected.
     base_command.add_actuators()->set_position(base_feedback_.actuators(i).position());
   }
   int array_index_offset = FIRST_JOINT_INDEX - 1;
@@ -198,15 +319,18 @@ void KinovaGen3HardwareInterface::read()
     // Note that this oddity is also reflected on the Kinova Dashboard 
     // (a positive torque there also means the joint is trying to make the position more negative)
     eff_[i] = -base_feedback_.actuators(i + array_index_offset).torque(); // originally Newton * meters
-    cmd_[i] = eff_[i]; // so that weird stuff doesn't happen before controller loads
+
+    // Starting point for the impedance control law in each cycle.
+    pos_cmd_[i] = pos_[i]; // makes position control optional
+    eff_cmd_[i] = 0.0; // makes torque control optional
   }
   
   if (NUMBER_OF_JOINTS == 7)
   {
-    ROS_DEBUG_THROTTLE(1, "Read an effort of %f, %f, %f, %f, %f, %f, %f", cmd_[0], cmd_[1], cmd_[2], cmd_[3], cmd_[4], cmd_[5], cmd_[6]);
+    ROS_DEBUG_THROTTLE(1, "Read an effort of %f, %f, %f, %f, %f, %f, %f", eff_cmd_[0], eff_cmd_[1], eff_cmd_[2], eff_cmd_[3], eff_cmd_[4], eff_cmd_[5], eff_cmd_[6]);
   }
   else
   {
-    ROS_DEBUG_THROTTLE(1, "Read effort %03.4f, vel %03.4f, pos %03.4f", cmd_[0], vel_[0], pos_[0]);
+    ROS_DEBUG_THROTTLE(1, "Read effort %03.4f, vel %03.4f, pos %03.4f", eff_cmd_[0], vel_[0], pos_[0]);
   }
 }

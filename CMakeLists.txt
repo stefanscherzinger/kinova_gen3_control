@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(kinova_gen3_control)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD 14)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -13,8 +13,13 @@ find_package(catkin REQUIRED
   joint_limits_interface 
   controller_manager
   angles
-  roscpp)
+  roscpp
+  control_toolbox
+  kdl_parser
+  )
 
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+ 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
@@ -133,24 +138,27 @@ catkin_package(
 include_directories(
  include
  ${catkin_INCLUDE_DIRS}
+ ${EIGEN_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
-add_library(${PROJECT_NAME}
-  src/${PROJECT_NAME}/kinova_gen3_hardware_interface.cpp
-  src/${PROJECT_NAME}/kinova_gen3_network_connection.cpp
-  src/${PROJECT_NAME}/fake_kinova_network_connection.cpp
-)
+## add_library(${PROJECT_NAME}
+## )
 
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
-add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+## add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(${PROJECT_NAME}_node src/kinova_gen3_hardware_interface_node.cpp)
+add_executable(${PROJECT_NAME}_node
+  src/${PROJECT_NAME}/kinova_gen3_hardware_interface.cpp
+  src/${PROJECT_NAME}/kinova_gen3_network_connection.cpp
+  src/${PROJECT_NAME}/fake_kinova_network_connection.cpp
+  src/kinova_gen3_hardware_interface_node.cpp
+  )
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
@@ -164,9 +172,9 @@ add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catk
 
 # Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME}_node
-   ${PROJECT_NAME}
    ${KORTEX_DIR}lib/release/libKortexApiCpp.a
    ${catkin_LIBRARIES}
+   Eigen3::Eigen
 )
 
 #############

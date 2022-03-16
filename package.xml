@@ -33,6 +33,8 @@
   <depend>xacro</depend>
   <depend>ros_controllers</depend>
   <depend>kortex_description</depend>
+  <depend>control_toolbox</depend>
+  <depend>kdl_parser</depend>
   <buildtool_depend>catkin</buildtool_depend>
 
 
